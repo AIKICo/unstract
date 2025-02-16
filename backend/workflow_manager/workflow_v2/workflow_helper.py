@@ -149,7 +149,7 @@ class WorkflowHelper:
         if total_files > 0:
             q_file_no_list = WorkflowUtil.get_q_no_list(workflow, total_files)
 
-        for index, (file_path, file_hash) in enumerate(input_files.items()):
+        for index, (file_name, file_hash) in enumerate(input_files.items()):
             # Get workflow execution file
             workflow_execution_file = cls._get_or_create_workflow_execution_file(
                 execution_service=execution_service,
@@ -194,7 +194,7 @@ class WorkflowHelper:
                 break
             except Exception as e:
                 failed_files += 1
-                error_message = f"Error processing file '{file_path}'. {e}"
+                error_message = f"Error processing file '{file_name}'. {e}"
                 logger.error(error_message, stack_info=True, exc_info=True)
                 workflow_execution_file.update_status(
                     status=ExecutionStatus.ERROR,
@@ -203,6 +203,7 @@ class WorkflowHelper:
                 execution_service.publish_log(
                     message=error_message, level=LogLevel.ERROR
                 )
+        # TODO: Review if we need partial success
         if failed_files and failed_files >= total_files:
             execution_service.update_execution(
                 ExecutionStatus.ERROR, error=error_message
@@ -231,14 +232,16 @@ class WorkflowHelper:
         workflow_file_execution: WorkflowFileExecution,
     ) -> Optional[str]:
         error: Optional[str] = None
+        # Multiple run_ids are linked to an execution_id
+        # Each run_id corresponds to workflow runs for a single file
+        # It should e uuid of workflow_file_execution
+        file_execution_id = str(workflow_file_execution.id)
         file_name = source.add_file_to_volume(
-            input_file_path=input_file, file_hash=file_hash
+            input_file_path=input_file,
+            workflow_file_execution=workflow_file_execution,
+            tags=execution_service.tags,
         )
         try:
-            # Multiple run_ids are linked to an execution_id
-            # Each run_id corresponds to workflow runs for a single file
-            # It should e uuid of workflow_file_execution
-            file_execution_id = str(workflow_file_execution.id)
             execution_service.file_execution_id = file_execution_id
             execution_service.initiate_tool_execution(
                 current_file_idx, total_files, file_name, single_step
@@ -256,6 +259,11 @@ class WorkflowHelper:
         except Exception as e:
             error = f"Error processing file '{os.path.basename(input_file)}'. {str(e)}"
             execution_service.publish_log(error, level=LogLevel.ERROR)
+            workflow_file_execution.update_status(
+                status=ExecutionStatus.ERROR,
+                execution_error=error,
+            )
+            # Not propagating error here to continue execution for other files
         execution_service.publish_update_log(
             LogState.RUNNING,
             f"Processing output for {file_name}",
@@ -366,6 +374,8 @@ class WorkflowHelper:
             )
             raise
         finally:
+            # TODO: Handle error gracefully during delete
+            # Mark status as an ERROR correctly
             destination.delete_execution_directory()
 
     @staticmethod

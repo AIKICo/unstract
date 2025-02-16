@@ -9,6 +9,7 @@ import fsspec
 import magic
 from connector_v2.models import ConnectorInstance
 from fsspec.implementations.local import LocalFileSystem
+from rest_framework.exceptions import APIException
 from unstract.sdk.constants import ToolExecKey
 from unstract.sdk.file_storage.constants import FileOperationParams
 from unstract.sdk.tool.mime_types import EXT_MIME_MAP
@@ -237,10 +238,15 @@ class DestinationConnector(BaseConnector):
 
         try:
             destination_fs.create_dir_if_not_exists(input_dir=output_directory)
-
             # Traverse local directory and create the same structure in the
             # output_directory
-            for root, dirs, files in os.walk(destination_volume_path):
+            if check_feature_flag_status(FeatureFlag.REMOTE_FILE_STORAGE):
+                file_system = FileSystem(FileStorageType.WORKFLOW_EXECUTION)
+                fs = file_system.get_file_storage()
+                dir_path = fs.walk(str(destination_volume_path))
+            else:
+                dir_path = os.walk(destination_volume_path)
+            for root, dirs, files in dir_path:
                 for dir_name in dirs:
                     current_dir = os.path.join(
                         output_directory,
@@ -421,25 +427,29 @@ class DestinationConnector(BaseConnector):
         result: Union[dict[str, Any], str] = ""
         try:
             # TODO: SDK handles validation; consider removing here.
-            mime = magic.Magic()
-            file_type = mime.from_file(output_file)
+            with open(output_file, "rb") as f:
+                file_type = magic.from_buffer(f.read(), mime=True)
             if output_type == ToolOutputType.JSON:
-                if "JSON" not in file_type:
-                    logger.error(f"Output type json mismatched {file_type}")
-                    raise ToolOutputTypeMismatch()
+                if file_type != EXT_MIME_MAP[ToolOutputType.JSON.lower()]:
+                    msg = f"Expected tool output type: JSON, got: '{file_type}'"
+                    logger.error(msg)
+                    raise ToolOutputTypeMismatch(detail=msg)
                 with open(output_file) as file:
                     result = json.load(file)
             elif output_type == ToolOutputType.TXT:
-                if "JSON" in file_type:
-                    logger.error(f"Output type txt mismatched {file_type}")
-                    raise ToolOutputTypeMismatch()
+                if file_type == EXT_MIME_MAP[ToolOutputType.JSON.lower()]:
+                    msg = f"Expected tool output type: TXT, got: '{file_type}'"
+                    logger.error(msg)
+                    raise ToolOutputTypeMismatch(detail=msg)
                 with open(output_file) as file:
                     result = file.read()
                     result = result.encode("utf-8").decode("unicode-escape")
             else:
                 raise InvalidToolOutputType()
         except (FileNotFoundError, json.JSONDecodeError) as err:
-            logger.error(f"Error while getting result {err}")
+            msg = f"Error while getting result from the tool: {err}"
+            logger.error(msg)
+            raise APIException(detail=msg)
         return result
 
     def get_result_with_file_storage(
@@ -465,20 +475,25 @@ class DestinationConnector(BaseConnector):
             )
             if output_type == ToolOutputType.JSON:
                 if file_type != EXT_MIME_MAP[ToolOutputType.JSON.lower()]:
-                    logger.error(f"Output type json mismatched {file_type}")
-                    raise ToolOutputTypeMismatch()
+                    msg = f"Expected tool output type: JSON, got: '{file_type}'"
+                    logger.error(msg)
+                    raise ToolOutputTypeMismatch(detail=msg)
                 file_content = file_storage.read(output_file, mode="r")
                 result = json.loads(file_content)
             elif output_type == ToolOutputType.TXT:
                 if file_type == EXT_MIME_MAP[ToolOutputType.JSON.lower()]:
-                    logger.error(f"Output type txt mismatched {file_type}")
-                    raise ToolOutputTypeMismatch()
+                    msg = f"Expected tool output type: TXT, got: '{file_type}'"
+                    logger.error(msg)
+                    raise ToolOutputTypeMismatch(detail=msg)
                 file_content = file_storage.read(output_file, mode="r")
                 result = file_content.encode("utf-8").decode("unicode-escape")
             else:
                 raise InvalidToolOutputType()
         except (FileNotFoundError, json.JSONDecodeError) as err:
-            logger.error(f"Error while getting result {err}")
+            msg = f"Error while getting result from the tool: {err}"
+            logger.error(msg)
+            raise APIException(detail=msg)
+
         return result
 
     def get_metadata(
@@ -504,7 +519,8 @@ class DestinationConnector(BaseConnector):
         if check_feature_flag_status(FeatureFlag.REMOTE_FILE_STORAGE):
             file_system = FileSystem(FileStorageType.WORKFLOW_EXECUTION)
             file_storage = file_system.get_file_storage()
-            file_storage.rm(self.execution_dir, recursive=True)
+            if file_storage.exists(self.execution_dir):
+                file_storage.rm(self.execution_dir, recursive=True)
         else:
             fs: LocalFileSystem = fsspec.filesystem("file")
             fs.rm(self.execution_dir, recursive=True)
@@ -523,7 +539,8 @@ class DestinationConnector(BaseConnector):
         if check_feature_flag_status(FeatureFlag.REMOTE_FILE_STORAGE):
             file_system = FileSystem(FileStorageType.API_EXECUTION)
             file_storage = file_system.get_file_storage()
-            file_storage.rm(api_storage_dir, recursive=True)
+            if file_storage.exists(api_storage_dir):
+                file_storage.rm(api_storage_dir, recursive=True)
         else:
             fs: LocalFileSystem = fsspec.filesystem("file")
             fs.rm(api_storage_dir, recursive=True)
