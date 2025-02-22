@@ -6,13 +6,11 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from constants import SettingsKeys  # type: ignore [attr-defined]
-from unstract.sdk.constants import LogLevel, LogState, MetadataKey, ToolEnv
+from unstract.sdk.constants import LogLevel, LogState, MetadataKey, ToolEnv, UsageKwargs
 from unstract.sdk.index import Index
 from unstract.sdk.prompt import PromptTool
 from unstract.sdk.tool.base import BaseTool
 from unstract.sdk.tool.entrypoint import ToolEntrypoint
-from unstract.sdk.utils import ToolUtils
-from unstract.sdk.utils.common_utils import CommonUtils
 from utils import json_to_markdown
 
 logger = logging.getLogger(__name__)
@@ -46,7 +44,6 @@ class StructureTool(BaseTool):
         )
         challenge_llm: str = settings.get(SettingsKeys.CHALLENGE_LLM_ADAPTER_ID, "")
         enable_highlight: bool = settings.get(SettingsKeys.ENABLE_HIGHLIGHT, False)
-        source_file_name = self.get_exec_metadata.get(MetadataKey.SOURCE_NAME)
         responder: PromptTool = PromptTool(
             tool=self,
             prompt_port=self.get_env_or_die(SettingsKeys.PROMPT_PORT),
@@ -74,8 +71,8 @@ class StructureTool(BaseTool):
             f"## Loaded '{ps_project_name}'\n{json_to_markdown(tool_metadata)}\n"
         )
         output_log = (
-            f"## Processing '{source_file_name}'\nThis might take a while and involve"
-            "...\n- Extracting text\n- Indexing\n- Retrieving answers "
+            f"## Processing '{self.source_file_name}'\nThis might take a while and "
+            "involve...\n- Extracting text\n- Indexing\n- Retrieving answers "
             f"for possibly '{total_prompt_count}' prompts"
         )
         self.stream_update(input_log, state=LogState.INPUT_UPDATE)
@@ -96,24 +93,21 @@ class StructureTool(BaseTool):
         _, file_name = os.path.split(input_file)
         if summarize_as_source:
             file_name = SettingsKeys.SUMMARIZE
-        if self.workflow_filestorage:
-            tool_data_dir = Path(self.get_env_or_die(ToolEnv.EXECUTION_DATA_DIR))
-        else:
-            tool_data_dir = Path(self.get_env_or_die(SettingsKeys.TOOL_DATA_DIR))
+        tool_data_dir = Path(self.get_env_or_die(ToolEnv.EXECUTION_DATA_DIR))
         execution_run_data_folder = Path(
-            self.get_env_or_die(SettingsKeys.EXECUTION_RUN_DATA_FOLDER)
+            self.get_env_or_die(ToolEnv.EXECUTION_DATA_DIR)
         )
-        run_id = CommonUtils.generate_uuid()
+
         index = Index(
             tool=self,
-            run_id=run_id,
+            run_id=self.file_execution_id,
             capture_metrics=True,
         )
         index_metrics = {}
         extracted_input_file = str(execution_run_data_folder / SettingsKeys.EXTRACT)
         # TODO : Resolve and pass log events ID
         payload = {
-            SettingsKeys.RUN_ID: run_id,
+            SettingsKeys.RUN_ID: self.file_execution_id,
             SettingsKeys.TOOL_SETTINGS: tool_settings,
             SettingsKeys.OUTPUTS: outputs,
             SettingsKeys.TOOL_ID: tool_id,
@@ -124,10 +118,10 @@ class StructureTool(BaseTool):
         }
         # TODO: Need to split extraction and indexing
         # to avoid unwanted indexing
-        self.stream_log(f"Indexing document '{source_file_name}'")
+        self.stream_log(f"Indexing document '{self.source_file_name}'")
         usage_kwargs: dict[Any, Any] = dict()
-        usage_kwargs[SettingsKeys.RUN_ID] = run_id
-        usage_kwargs[SettingsKeys.FILE_NAME] = source_file_name
+        usage_kwargs[UsageKwargs.RUN_ID] = self.file_execution_id
+        usage_kwargs[UsageKwargs.FILE_NAME] = self.source_file_name
 
         process_text: Optional[Callable[[str], str]] = None
         try:
@@ -151,11 +145,8 @@ class StructureTool(BaseTool):
                 reindex=True,
                 usage_kwargs=usage_kwargs,
                 process_text=process_text,
-                **(
-                    {"fs": self.workflow_filestorage}
-                    if self.workflow_filestorage is not None
-                    else {}
-                ),
+                tags=self.tags,
+                **({"fs": self.workflow_filestorage}),
             )
             index_metrics = {SettingsKeys.INDEXING: index.get_metrics()}
             if summarize_as_source:
@@ -193,6 +184,8 @@ class StructureTool(BaseTool):
                             reindex=reindex,
                             usage_kwargs=usage_kwargs,
                             process_text=process_text,
+                            tags=self.tags,
+                            **({"fs": self.workflow_filestorage}),
                         )
                         index_metrics[output[SettingsKeys.NAME]] = {
                             SettingsKeys.INDEXING: index.get_metrics()
@@ -245,7 +238,7 @@ class StructureTool(BaseTool):
         if SettingsKeys.METADATA in structured_output_dict:
             structured_output_dict[SettingsKeys.METADATA][
                 SettingsKeys.FILE_NAME
-            ] = source_file_name
+            ] = self.source_file_name
 
         if not summarize_as_source:
             metadata = structured_output_dict[SettingsKeys.METADATA]
@@ -280,15 +273,10 @@ class StructureTool(BaseTool):
         # Write the translated text to output file
         try:
             self.stream_log("Writing parsed output...")
-            source_name = self.get_exec_metadata.get(MetadataKey.SOURCE_NAME)
-            output_path = Path(output_dir) / f"{Path(source_name).stem}.json"
-            if self.workflow_filestorage:
-                self.workflow_filestorage.json_dump(
-                    path=output_path, data=structured_output_dict
-                )
-            else:
-                with open(output_path, "w", encoding="utf-8") as f:
-                    f.write(structured_output)
+            output_path = Path(output_dir) / f"{Path(self.source_file_name).stem}.json"
+            self.workflow_filestorage.json_dump(
+                path=output_path, data=structured_output_dict
+            )
         except OSError as e:
             self.stream_error_and_exit(f"Error creating output file: {e}")
         except json.JSONDecodeError as e:
@@ -324,28 +312,18 @@ class StructureTool(BaseTool):
         vector_db_instance_id: str = tool_settings[SettingsKeys.VECTOR_DB]
         x2text_instance_id: str = tool_settings[SettingsKeys.X2TEXT_ADAPTER]
         summarize_prompt: str = tool_settings[SettingsKeys.SUMMARIZE_PROMPT]
-        run_id: str = usage_kwargs.get(SettingsKeys.RUN_ID)
+        run_id: str = usage_kwargs.get(UsageKwargs.RUN_ID)
         extract_file_path = tool_data_dir / SettingsKeys.EXTRACT
         summarize_file_path = tool_data_dir / SettingsKeys.SUMMARIZE
 
         summarized_context = ""
-        if self.workflow_filestorage:
-            if self.workflow_filestorage.exists(summarize_file_path):
-                summarized_context = self.workflow_filestorage.read(
-                    path=summarize_file_path, mode="r"
-                )
-        elif summarize_file_path.exists():
-            with open(summarize_file_path, encoding="utf-8") as f:
-                summarized_context = f.read()
+        if self.workflow_filestorage.exists(summarize_file_path):
+            summarized_context = self.workflow_filestorage.read(
+                path=summarize_file_path, mode="r"
+            )
         if not summarized_context:
             context = ""
-            if self.workflow_filestorage:
-                context = self.workflow_filestorage.read(
-                    path=extract_file_path, mode="r"
-                )
-            else:
-                with open(extract_file_path, encoding="utf-8") as file:
-                    context = file.read()
+            context = self.workflow_filestorage.read(path=extract_file_path, mode="r")
             prompt_keys = []
             for output in outputs:
                 prompt_keys.append(output[SettingsKeys.NAME])
@@ -370,17 +348,13 @@ class StructureTool(BaseTool):
             structure_output = json.loads(response[SettingsKeys.STRUCTURE_OUTPUT])
             summarized_context = structure_output.get(SettingsKeys.DATA, "")
             self.stream_log("Writing summarized context to a file")
-            if self.workflow_filestorage:
-                self.workflow_filestorage.write(
-                    path=summarize_file_path, mode="w", data=summarized_context
-                )
-            else:
-                with open(summarize_file_path, "w", encoding="utf-8") as f:
-                    f.write(summarized_context)
+            self.workflow_filestorage.write(
+                path=summarize_file_path, mode="w", data=summarized_context
+            )
 
         self.stream_log("Indexing summarized context")
-        summarize_file_hash: str = ToolUtils.get_hash_from_file(
-            file_path=summarize_file_path
+        summarize_file_hash: str = self.workflow_filestorage.get_hash_from_file(
+            path=summarize_file_path
         )
         index.index(
             tool_id=tool_id,
@@ -392,11 +366,8 @@ class StructureTool(BaseTool):
             chunk_size=0,
             chunk_overlap=0,
             usage_kwargs=usage_kwargs,
-            **(
-                {"fs": self.workflow_filestorage}
-                if self.workflow_filestorage is not None
-                else {}
-            ),
+            tags=self.tags,
+            **({"fs": self.workflow_filestorage}),
         )
         return summarize_file_hash
 

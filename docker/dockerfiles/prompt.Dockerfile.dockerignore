@@ -52,6 +52,7 @@
 .pre-commit-config.yaml
 **/tests
 test*.py
+**/*.egg-info
 
 backend
 frontend
@@ -61,5 +62,5 @@ tools
 unstract
 !unstract/core
 !unstract/flags
-worker
+runner
 x2text-service

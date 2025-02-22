@@ -1,7 +1,7 @@
 import time
 import traceback
 from json import JSONDecodeError
-from typing import Any
+from typing import Any, Optional
 
 from flask import json, jsonify, request
 from llama_index.core.vector_stores import ExactMatchFilter, MetadataFilters
@@ -12,6 +12,7 @@ from unstract.prompt_service.constants import RunLevel
 from unstract.prompt_service.exceptions import APIError, ErrorResponse, NoPayloadError
 from unstract.prompt_service.helper import (
     construct_and_run_prompt,
+    extract_line_item,
     extract_table,
     extract_variable,
     get_cleaned_context,
@@ -100,6 +101,7 @@ def prompt_processor() -> Any:
     if not payload:
         raise NoPayloadError
     tool_settings = payload.get(PSKeys.TOOL_SETTINGS, {})
+    enable_challenge = tool_settings.get(PSKeys.ENABLE_CHALLENGE, False)
     # TODO: Rename "outputs" to "prompts" in payload
     prompts = payload.get(PSKeys.OUTPUTS, [])
     tool_id: str = payload.get(PSKeys.TOOL_ID, "")
@@ -243,6 +245,7 @@ def prompt_processor() -> Any:
                 response = {
                     PSKeys.METADATA: metadata,
                     PSKeys.OUTPUT: structured_output,
+                    PSKeys.METRICS: metrics,
                 }
                 return response
             except APIError as api_error:
@@ -263,6 +266,37 @@ def prompt_processor() -> Any:
                     "Error while extracting table for the prompt",
                 )
                 raise api_error
+        elif output[PSKeys.TYPE] == PSKeys.LINE_ITEM:
+            try:
+                structured_output = extract_line_item(
+                    tool_settings=tool_settings,
+                    output=output,
+                    plugins=plugins,
+                    structured_output=structured_output,
+                    llm=llm,
+                    file_path=file_path,
+                    metadata=metadata,
+                    execution_source=execution_source,
+                )
+                continue
+            except APIError as e:
+                app.logger.error(
+                    "Failed to extract line-item for the prompt %s: %s",
+                    output[PSKeys.NAME],
+                    str(e),
+                )
+                publish_log(
+                    log_events_id,
+                    {
+                        "tool_id": tool_id,
+                        "prompt_key": prompt_name,
+                        "doc_name": doc_name,
+                    },
+                    LogLevel.ERROR,
+                    RunLevel.RUN,
+                    "Error while extracting line-item for the prompt",
+                )
+                raise e
 
         try:
             if chunk_size == 0:
@@ -296,6 +330,7 @@ def prompt_processor() -> Any:
                     prompt="promptx",
                     metadata=metadata,
                     file_path=file_path,
+                    execution_source=execution_source,
                 )
                 metadata[PSKeys.CONTEXT][output[PSKeys.NAME]] = get_cleaned_context(
                     context
@@ -326,6 +361,7 @@ def prompt_processor() -> Any:
                         vector_index=vector_index,
                         retrieval_type=retrieval_strategy,
                         metadata=metadata,
+                        execution_source=execution_source,
                     )
                     metadata[PSKeys.CONTEXT][output[PSKeys.NAME]] = get_cleaned_context(
                         context
@@ -460,12 +496,24 @@ def prompt_processor() -> Any:
                             )
                             structured_output[output[PSKeys.NAME]] = json.loads(answer)
                         except JSONDecodeError as e:
-                            app.logger.info(
-                                f"JSON format error : {answer}", LogLevel.ERROR
+                            err_msg = (
+                                f"Error parsing response (to json): {e}\n"
+                                f"Candidate JSON: {answer}"
                             )
-                            app.logger.info(
-                                f"Error parsing response (to json): {e}",
-                                LogLevel.ERROR,
+                            app.logger.info(err_msg, LogLevel.ERROR)
+                            # TODO: Format log message after unifying these types
+                            publish_log(
+                                log_events_id,
+                                {
+                                    "tool_id": tool_id,
+                                    "prompt_key": prompt_name,
+                                    "doc_name": doc_name,
+                                },
+                                LogLevel.INFO,
+                                RunLevel.RUN,
+                                "Unable to parse JSON response from LLM, try using our"
+                                " cloud / enterprise feature of 'line-item', "
+                                "'record' or 'table' type",
                             )
                             structured_output[output[PSKeys.NAME]] = {}
 
@@ -478,7 +526,6 @@ def prompt_processor() -> Any:
                     output[PSKeys.NAME]
                 ].rstrip("\n")
 
-            enable_challenge = tool_settings.get(PSKeys.ENABLE_CHALLENGE)
             # Challenge condition
             if enable_challenge:
                 challenge_plugin: dict[str, Any] = plugins.get(PSKeys.CHALLENGE, {})
@@ -762,6 +809,7 @@ def run_retrieval(  # type:ignore
     vector_index,
     retrieval_type: str,
     metadata: dict[str, Any],
+    execution_source: Optional[str] = None,
 ) -> tuple[str, set[str]]:
     context: set[str] = set()
     prompt = output[PSKeys.PROMPTX]
@@ -824,6 +872,7 @@ def run_retrieval(  # type:ignore
         context="\n".join(context),
         prompt="promptx",
         metadata=metadata,
+        execution_source=execution_source,
     )
 
     return (answer, context)

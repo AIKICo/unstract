@@ -7,6 +7,7 @@ from adlfs import AzureBlobFileSystem
 
 from unstract.connectors.exceptions import AzureHttpError, ConnectorError
 from unstract.connectors.filesystems.unstract_file_system import UnstractFileSystem
+from unstract.filesystem import FileStorageType, FileSystem
 
 logging.getLogger("azurefs").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
@@ -90,10 +91,12 @@ class AzureCloudStorageFS(UnstractFileSystem):
             AzureHttpError: returns error for invalid directory
         """
         normalized_path = os.path.normpath(destination_path)
-        fs = self.get_fsspec_fs()
+        destination_connector_fs = self.get_fsspec_fs()
         try:
-            with open(source_path, "rb") as source_file:
-                fs.write_bytes(normalized_path, source_file.read())
+            file_system = FileSystem(FileStorageType.WORKFLOW_EXECUTION)
+            workflow_fs = file_system.get_file_storage()
+            data = workflow_fs.read(path=source_path, mode="rb")
+            destination_connector_fs.write_bytes(normalized_path, data)
         except AzureException.HttpResponseError as e:
             self.raise_http_exception(e=e, path=normalized_path)
 

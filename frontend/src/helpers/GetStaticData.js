@@ -2,6 +2,14 @@ import moment from "moment";
 import momentTz from "moment-timezone";
 import { v4 as uuidv4 } from "uuid";
 
+let cloudHomePagePath;
+try {
+  cloudHomePagePath =
+    require("../plugins/unstract-subscription/helper/constants").cloudHomePagePath;
+} catch (err) {
+  // Ignore if plugin not available
+}
+
 const THEME = {
   DARK: "dark",
   LIGHT: "light",
@@ -162,21 +170,30 @@ const listOfAppDeployments = [
   },
 ];
 
-const getReadableDateAndTime = (timestamp) => {
+const getReadableDateAndTime = (timestamp, includeTime = true) => {
   const currentDate = new Date(timestamp);
 
-  // Options for formatting the date and time
-  const options = {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
+  if (isNaN(currentDate)) {
+    return "Invalid date";
+  }
+
+  // Options for formatting the date
+  const dateOptions = { year: "numeric", month: "long", day: "numeric" };
+  const formattedDate = currentDate.toLocaleDateString("en-US", dateOptions);
+
+  if (!includeTime) {
+    return formattedDate;
+  }
+
+  // Options for formatting the time
+  const timeOptions = {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
     timeZoneName: "short",
   };
-  const formattedDate = currentDate.toLocaleDateString("en-US", options);
-  const formattedTime = currentDate.toLocaleTimeString("en-US", options);
+  const formattedTime = currentDate.toLocaleTimeString("en-US", timeOptions);
+
   return formattedDate + ", " + formattedTime;
 };
 
@@ -281,7 +298,7 @@ const getDateTimeString = (timestamp) => {
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}.${milliseconds}`;
 };
 
-const base64toBlob = (data) => {
+const base64toBlob = (data, mimeType) => {
   const bytes = atob(data);
   let length = bytes.length;
   const out = new Uint8Array(length);
@@ -290,7 +307,7 @@ const base64toBlob = (data) => {
     out[length] = bytes.charCodeAt(length);
   }
 
-  return new Blob([out], { type: "application/pdf" });
+  return new Blob([out], { type: mimeType || "application/pdf" });
 };
 
 const removeFileExtension = (fileName) => {
@@ -544,9 +561,32 @@ const generateApiRunStatusId = (docId, profileId) => {
   return `${docId}__${profileId}`;
 };
 
+const base64toBlobWithMime = (data, mimeType) => {
+  // Converts a base64 encoded string to a Blob object with the specified MIME type.
+  const byteCharacters = atob(data?.data); // Decode base64
+  const byteArrays = [];
+
+  for (let offset = 0; offset < byteCharacters.length; offset += 512) {
+    const slice = byteCharacters.slice(offset, offset + 512);
+    const byteNumbers = new Array(slice.length);
+    for (let i = 0; i < slice.length; i++) {
+      byteNumbers[i] = slice.charCodeAt(i);
+    }
+    const byteArray = new Uint8Array(byteNumbers);
+    byteArrays.push(byteArray);
+  }
+  return new Blob(byteArrays, { type: mimeType });
+};
+
 const generateCoverageKey = (promptId, profileId) => {
   return `coverage_${promptId}_${profileId}`;
 };
+
+const TRIAL_PLAN = "TRIAL";
+
+const homePagePath = cloudHomePagePath || "tools";
+
+const UNSTRACT_ADMIN = "unstract_admin";
 
 export {
   CONNECTOR_TYPE_MAP,
@@ -597,5 +637,9 @@ export {
   PROMPT_RUN_TYPES,
   PROMPT_RUN_API_STATUSES,
   generateApiRunStatusId,
+  base64toBlobWithMime,
   generateCoverageKey,
+  TRIAL_PLAN,
+  homePagePath,
+  UNSTRACT_ADMIN,
 };

@@ -76,6 +76,7 @@ class PromptServiceContants:
     REQUIRED = "required"
     EXECUTION_SOURCE = "execution_source"
     METRICS = "metrics"
+    LINE_ITEM = "line-item"
 
 
 class RunLevel(Enum):
@@ -90,12 +91,6 @@ class RunLevel(Enum):
     TABLE_EXTRACTION = "TABLE_EXTRACTION"
 
 
-class FeatureFlag:
-    """Temporary feature flags."""
-
-    REMOTE_FILE_STORAGE = "remote_file_storage"
-
-
 class DBTableV2:
     """Database tables."""
 
@@ -107,8 +102,6 @@ class DBTableV2:
 
 
 class FileStorageKeys:
-    FILE_STORAGE_PROVIDER = "FILE_STORAGE_PROVIDER"
-    FILE_STORAGE_CREDENTIALS = "FILE_STORAGE_CREDENTIALS"
     PERMANENT_REMOTE_STORAGE = "PERMANENT_REMOTE_STORAGE"
     TEMPORARY_REMOTE_STORAGE = "TEMPORARY_REMOTE_STORAGE"
 

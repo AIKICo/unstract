@@ -2,12 +2,14 @@ import base64
 import logging
 import os
 from pathlib import Path
-from typing import Any, Union
+from typing import Any
 
+from file_management.exceptions import InvalidFileType
 from file_management.file_management_helper import FileManagerHelper
 from unstract.sdk.file_storage import FileStorage
-from utils.file_storage.constants import FileStorageConstants, FileStorageType
-from utils.file_storage.helpers.common_file_helper import FileStorageHelper
+from unstract.sdk.file_storage.constants import StorageType
+from unstract.sdk.file_storage.env_helper import EnvHelper
+from utils.file_storage.constants import FileStorageConstants, FileStorageKeys
 
 from unstract.core.utilities import UnstractUtils
 
@@ -37,8 +39,9 @@ class PromptStudioFileHelper:
         extract_file_path = str(Path(file_path) / "extract")
         summarize_file_path = str(Path(file_path) / "summarize")
         if is_create:
-            fs_instance = FileStorageHelper.initialize_file_storage(
-                type=FileStorageType.PERMANENT
+            fs_instance = EnvHelper.get_storage(
+                storage_type=StorageType.PERMANENT,
+                env_name=FileStorageKeys.PERMANENT_REMOTE_STORAGE,
             )
             fs_instance.mkdir(file_path, create_parents=True)
             fs_instance.mkdir(extract_file_path, create_parents=True)
@@ -47,7 +50,7 @@ class PromptStudioFileHelper:
 
     @staticmethod
     def upload_for_ide(
-        org_id: str, user_id: str, tool_id: str, uploaded_file: Any
+        org_id: str, user_id: str, tool_id: str, file_data: Any, file_name: str
     ) -> None:
         """Uploads the file to a remote storage
 
@@ -55,10 +58,12 @@ class PromptStudioFileHelper:
             org_id (str): Organization ID
             user_id (str): User ID
             tool_id (str): ID of the prompt studio tool
-            uploaded_file : File to upload to remote
+            file_data (Any) : File data
+            file_name (str) : Name of the file to be uploaded
         """
-        fs_instance = FileStorageHelper.initialize_file_storage(
-            type=FileStorageType.PERMANENT
+        fs_instance = EnvHelper.get_storage(
+            storage_type=StorageType.PERMANENT,
+            env_name=FileStorageKeys.PERMANENT_REMOTE_STORAGE,
         )
         file_system_path = (
             PromptStudioFileHelper.get_or_create_prompt_studio_subdirectory(
@@ -68,17 +73,27 @@ class PromptStudioFileHelper:
                 tool_id=str(tool_id),
             )
         )
-        file_path = str(Path(file_system_path) / uploaded_file.name)
-        fs_instance.write(path=file_path, mode="wb", data=uploaded_file.read())
+
+        file_path = str(Path(file_system_path) / file_name)
+        fs_instance.write(
+            path=file_path,
+            mode="wb",
+            data=file_data if isinstance(file_data, bytes) else file_data.read(),
+        )
 
     @staticmethod
     def fetch_file_contents(
-        org_id: str, user_id: str, tool_id: str, file_name: str
-    ) -> Union[bytes, str]:
+        org_id: str,
+        user_id: str,
+        tool_id: str,
+        file_name: str,
+        allowed_content_types: list[str],
+    ) -> dict[str, Any]:
         """Method to fetch file contents from the remote location.
         The path is constructed in runtime based on the args"""
-        fs_instance = FileStorageHelper.initialize_file_storage(
-            type=FileStorageType.PERMANENT
+        fs_instance = EnvHelper.get_storage(
+            storage_type=StorageType.PERMANENT,
+            env_name=FileStorageKeys.PERMANENT_REMOTE_STORAGE,
         )
         # Fetching legacy file path for lazy copy
         # This has to be removed once the usage of FS APIs
@@ -100,7 +115,7 @@ class PromptStudioFileHelper:
         )
         # TODO : Handle this with proper fix
         # Temporary Hack for frictionless onboarding as the user id will be empty
-        if not fs_instance.exists(file_system_path):
+        if not user_id and not fs_instance.exists(file_system_path):
             file_system_path = (
                 PromptStudioFileHelper.get_or_create_prompt_studio_subdirectory(
                     org_id=org_id,
@@ -111,7 +126,9 @@ class PromptStudioFileHelper:
             )
         file_path = str(Path(file_system_path) / file_name)
         legacy_file_path = str(Path(legacy_file_system_path) / file_name)
-        file_content_type = fs_instance.mime_type(file_path)
+        file_content_type = fs_instance.mime_type(
+            path=file_path, legacy_storage_path=legacy_file_path
+        )
         if file_content_type == "application/pdf":
             # Read contents of PDF file into a string
             text_content_bytes: bytes = fs_instance.read(
@@ -121,7 +138,7 @@ class PromptStudioFileHelper:
                 encoding="utf-8",
             )
             encoded_string = base64.b64encode(bytes(text_content_bytes))
-            return encoded_string
+            return {"data": encoded_string, "mime_type": file_content_type}
 
         elif file_content_type == "text/plain":
             text_content_string: str = fs_instance.read(
@@ -130,17 +147,23 @@ class PromptStudioFileHelper:
                 legacy_storage_path=legacy_file_path,
                 encoding="utf-8",
             )
-            return text_content_string
+        # Check if the file type is in the allowed list
+        elif file_content_type not in allowed_content_types:
+            raise InvalidFileType(f"File type '{file_content_type}' is not allowed.")
+
         else:
-            raise ValueError(f"Unsupported file type: {file_content_type}")
+            logger.warning(f"File type '{file_content_type}' is not handled.")
+
+        return {"data": text_content_string, "mime_type": file_content_type}
 
     @staticmethod
     def delete_for_ide(org_id: str, user_id: str, tool_id: str, file_name: str) -> bool:
         """Method to delete file in remote while the corresponsing prompt
         studio project is deleted or the file is removed from the file manager.
         This method handles deleted for related files as well."""
-        fs_instance = FileStorageHelper.initialize_file_storage(
-            type=FileStorageType.PERMANENT
+        fs_instance = EnvHelper.get_storage(
+            storage_type=StorageType.PERMANENT,
+            env_name=FileStorageKeys.PERMANENT_REMOTE_STORAGE,
         )
         file_system_path = (
             PromptStudioFileHelper.get_or_create_prompt_studio_subdirectory(

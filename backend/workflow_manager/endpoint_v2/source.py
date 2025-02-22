@@ -34,15 +34,12 @@ from workflow_manager.endpoint_v2.exceptions import (
     SourceConnectorNotConfigured,
 )
 from workflow_manager.endpoint_v2.models import WorkflowEndpoint
+from workflow_manager.file_execution.models import WorkflowFileExecution
 from workflow_manager.workflow_v2.execution import WorkflowExecutionServiceHelper
 from workflow_manager.workflow_v2.file_history_helper import FileHistoryHelper
 from workflow_manager.workflow_v2.models.workflow import Workflow
 
-from backend.constants import FeatureFlag
-from unstract.flags.feature_flag import check_feature_flag_status
-
-if check_feature_flag_status(FeatureFlag.REMOTE_FILE_STORAGE):
-    from unstract.filesystem import FileStorageType, FileSystem
+from unstract.filesystem import FileStorageType, FileSystem
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +240,7 @@ class SourceConnector(BaseConnector):
             return None
 
         folders_list = "\n".join(f"- `{folder.strip()}`" for folder in folders)
-        input_log = f"##Folders to process:\n\n{folders_list}\n\n"
+        input_log = f"## Folders to process:\n\n{folders_list}\n\n"
         self.execution_service.publish_update_log(
             state=LogState.INPUT_UPDATE, message=input_log
         )
@@ -255,9 +252,10 @@ class SourceConnector(BaseConnector):
     def publish_input_file_content(self, input_file_path: str, input_text: str) -> None:
         if not self.execution_service:
             return None
-        output_log_message = f"##Input text:\n\n```text\n{input_text}\n```\n\n"
+        output_log_message = f"## Input text:\n\n```text\n{input_text}\n```\n\n"
         input_log_message = (
-            "##Input file:\n\n```text\n" f"{os.path.basename(input_file_path)}\n```\n\n"
+            "## Input file:\n\n```text\n"
+            f"{os.path.basename(input_file_path)}\n```\n\n"
         )
         self.execution_service.publish_update_log(
             state=LogState.INPUT_UPDATE, message=input_log_message
@@ -506,17 +504,10 @@ class SourceConnector(BaseConnector):
         )
         self.publish_input_file_content(input_file_path, input_log)
 
-        if check_feature_flag_status(FeatureFlag.REMOTE_FILE_STORAGE):
-            file_system = FileSystem(FileStorageType.WORKFLOW_EXECUTION)
-            file_storage = file_system.get_file_storage()
-            file_storage.write(path=source_file_path, mode="wb", data=file_content)
-            file_storage.write(path=infile_path, mode="wb", data=file_content)
-        else:
-            with fsspec.open(source_file, "wb") as local_file:
-                local_file.write(file_content)
-
-            # Copy file to infile directory
-            self.copy_file_to_infile_dir(source_file_path, infile_path)
+        file_system = FileSystem(FileStorageType.WORKFLOW_EXECUTION)
+        file_storage = file_system.get_file_storage()
+        file_storage.write(path=source_file_path, mode="wb", data=file_content)
+        file_storage.write(path=infile_path, mode="wb", data=file_content)
 
         logger.info(f"{input_file_path} is added to execution directory")
         return hash_value_of_file_content
@@ -525,20 +516,17 @@ class SourceConnector(BaseConnector):
         """Add input file to execution directory from api storage."""
         infile_path = os.path.join(self.execution_dir, WorkflowFileType.INFILE)
         source_path = os.path.join(self.execution_dir, WorkflowFileType.SOURCE)
-        if check_feature_flag_status(FeatureFlag.REMOTE_FILE_STORAGE):
-            api_file_system = FileSystem(FileStorageType.API_EXECUTION)
-            api_file_storage = api_file_system.get_file_storage()
-            workflow_file_system = FileSystem(FileStorageType.WORKFLOW_EXECUTION)
-            workflow_file_storage = workflow_file_system.get_file_storage()
-            self._copy_file_to_destination(
-                source_storage=api_file_storage,
-                destination_storage=workflow_file_storage,
-                source_path=input_file_path,
-                destination_paths=[infile_path, source_path],
-            )
-        else:
-            shutil.copyfile(input_file_path, infile_path)
-            shutil.copyfile(input_file_path, source_path)
+
+        api_file_system = FileSystem(FileStorageType.API_EXECUTION)
+        api_file_storage = api_file_system.get_file_storage()
+        workflow_file_system = FileSystem(FileStorageType.WORKFLOW_EXECUTION)
+        workflow_file_storage = workflow_file_system.get_file_storage()
+        self._copy_file_to_destination(
+            source_storage=api_file_storage,
+            destination_storage=workflow_file_storage,
+            source_path=input_file_path,
+            destination_paths=[infile_path, source_path],
+        )
 
     # TODO: replace it with method from SDK Utils
     def _copy_file_to_destination(
@@ -596,11 +584,18 @@ class SourceConnector(BaseConnector):
                 # Update the seek position
                 seek_position += len(chunk)
 
-    def add_file_to_volume(self, input_file_path: str, file_hash: FileHash) -> str:
+    def add_file_to_volume(
+        self,
+        input_file_path: str,
+        workflow_file_execution: WorkflowFileExecution,
+        tags=list[str],
+    ) -> str:
         """Add input file to execution directory.
 
         Args:
             input_file_path (str): source file
+            workflow_file_execution: WorkflowFileExecution model
+            tags (list[str]): Tag names associated with the workflow execution.
 
         Raises:
             InvalidSource: _description_
@@ -614,18 +609,21 @@ class SourceConnector(BaseConnector):
             file_content_hash = self.add_input_from_connector_to_volume(
                 input_file_path=input_file_path,
             )
-            if file_content_hash != file_hash.file_hash:
+            if file_content_hash != workflow_file_execution.file_hash:
                 raise FileHashMismatched()
         elif connection_type == WorkflowEndpoint.ConnectionType.API:
             self.add_input_from_api_storage_to_volume(input_file_path=input_file_path)
-            if file_name != file_hash.file_name:
+            if file_name != workflow_file_execution.file_name:
                 raise FileHashNotFound()
-            file_content_hash = file_hash.file_hash
+            file_content_hash = workflow_file_execution.file_hash
         else:
             raise InvalidSourceConnectionType()
 
         self.add_metadata_to_volume(
-            input_file_path=input_file_path, source_hash=file_content_hash
+            input_file_path=input_file_path,
+            file_execution_id=workflow_file_execution.id,
+            source_hash=file_content_hash,
+            tags=tags,
         )
         return file_name
 
@@ -689,20 +687,13 @@ class SourceConnector(BaseConnector):
         for file in file_objs:
             file_name = file.name
             destination_path = os.path.join(api_storage_dir, file_name)
-            if check_feature_flag_status(FeatureFlag.REMOTE_FILE_STORAGE):
-                file_system = FileSystem(FileStorageType.API_EXECUTION)
-                file_storage = file_system.get_file_storage()
-                buffer = bytearray()
-                for chunk in file.chunks():
-                    buffer.extend(chunk)
-                    file_storage.write(path=destination_path, mode="wb", data=buffer)
-            else:
-                os.makedirs(os.path.dirname(destination_path), exist_ok=True)
-                with open(destination_path, "wb") as f:
-                    buffer = bytearray()
-                    for chunk in file.chunks():
-                        buffer.extend(chunk)
-                    f.write(buffer)
+
+            file_system = FileSystem(FileStorageType.API_EXECUTION)
+            file_storage = file_system.get_file_storage()
+            buffer = bytearray()
+            for chunk in file.chunks():
+                buffer.extend(chunk)
+                file_storage.write(path=destination_path, mode="wb", data=buffer)
             file_hash = cls.hash_str(buffer)
             connection_type = WorkflowEndpoint.ConnectionType.API
 

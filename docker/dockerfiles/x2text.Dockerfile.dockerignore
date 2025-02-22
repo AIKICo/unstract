@@ -52,6 +52,7 @@
 .pre-commit-config.yaml
 **/tests
 test*.py
+**/*.egg-info
 
 backend
 frontend
@@ -59,5 +60,5 @@ platform-service
 prompt-service
 tools
 unstract
-worker
+runner
 !x2text-service
